@@ -4,24 +4,40 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 let container, camera, scene, renderer, cube;
 let controls;
+let moveState = { forward: 0, back: 0, left: 0, right: 0 };
+let moveSpeed = 6; // units per second
+let lastTime = performance.now();
 
 init();
 
 function init() {
-  container = document.createElement('div');
-  document.body.appendChild(container);
+  // prefer attaching renderer to existing #app element in index.html
+  container = document.getElementById('app');
+  if (!container) {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  }
+  // make sure the container fills available space
+  container.style.width = '100%';
+  container.style.height = '100%';
+  container.style.margin = '0';
+  container.style.padding = '0';
 
   // Scene
   scene = new THREE.Scene();
 
   // Camera
-  camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-  camera.position.x = 5;
+  camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+  // place the camera so the full grid is visible on load
+  camera.position.set(0, 6, 12);
 
   // Renderer
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio || 1);
   renderer.setSize(window.innerWidth, window.innerHeight);
+  // make canvas scale to container
+  renderer.domElement.style.width = '100%';
+  renderer.domElement.style.height = '100%';
   container.appendChild(renderer.domElement);
 
   // Cube
@@ -47,9 +63,48 @@ function init() {
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true; // smoothes camera movement
   controls.dampingFactor = 0.05;
+  // start looking at origin (where geometries will be centered)
+  controls.target.set(0, 0.6, 0);
+  controls.update();
+
+  // WASD movement state
+  initWASDControls();
+
+  // HUD for controls
+  createHUD();
 
   // Handle resize
   window.addEventListener('resize', onWindowResize, false);
+}
+
+function createHUD() {
+  const hud = document.createElement('div');
+  hud.id = 'wasd-hud';
+  hud.style.position = 'fixed';
+  hud.style.left = '90px';
+  // hud.style.top = '50%';
+  hud.style.transform = 'translateY(-50%)';
+  hud.style.maxWidth = '220px';
+  hud.style.padding = '10px 12px';
+  hud.style.background = 'rgba(0,0,0,0.6)';
+  hud.style.color = '#fff';
+  hud.style.fontFamily = 'sans-serif';
+  hud.style.fontSize = '13px';
+  hud.style.borderRadius = '6px';
+  hud.style.zIndex = '9999';
+  hud.innerHTML = `
+    <div style="font-weight:600;margin-bottom:6px;">Controls</div>
+    <div>W / S - forward / back</div>
+    <div>A / D - left / right</div>
+    <div style="margin-top:6px; font-size:12px; opacity:0.9">Click canvas to focus. Use mouse to orbit.</div>
+    <div style="margin-top:8px; text-align:right;"><button id="hud-hide" style="background:#fff;color:#000;border:none;padding:4px 6px;border-radius:4px;cursor:pointer">Hide</button></div>
+  `;
+  document.body.appendChild(hud);
+
+  const btn = document.getElementById('hud-hide');
+  btn.addEventListener('click', () => {
+    hud.style.display = 'none';
+  });
 }
 
 function createGeometries() {
@@ -99,6 +154,13 @@ function createGeometries() {
 }
 
 function animate() {
+  const now = performance.now();
+  const delta = (now - lastTime) / 1000; // seconds
+  lastTime = now;
+
+  // apply WASD movement
+  updateMovement(delta);
+
   // rotate the main cube a bit
   cube.rotation.x += 0.01;
   cube.rotation.y += 0.01;
@@ -115,6 +177,50 @@ function animate() {
   if (controls) controls.update();
 
   renderer.render(scene, camera);
+}
+
+function initWASDControls() {
+  window.addEventListener('keydown', (e) => {
+    switch (e.code) {
+      case 'KeyW': moveState.forward = 1; break;
+      case 'KeyS': moveState.back = 1; break;
+      case 'KeyA': moveState.left = 1; break;
+      case 'KeyD': moveState.right = 1; break;
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    switch (e.code) {
+      case 'KeyW': moveState.forward = 0; break;
+      case 'KeyS': moveState.back = 0; break;
+      case 'KeyA': moveState.left = 0; break;
+      case 'KeyD': moveState.right = 0; break;
+    }
+  });
+}
+
+function updateMovement(delta) {
+  const dir = new THREE.Vector3();
+  // forward/back relative to camera direction (ignore y)
+  camera.getWorldDirection(dir);
+  dir.y = 0;
+  dir.normalize();
+
+  const right = new THREE.Vector3();
+  right.crossVectors(camera.up, dir).normalize();
+
+  const move = new THREE.Vector3();
+  if (moveState.forward) move.add(dir);
+  if (moveState.back) move.sub(dir);
+  if (moveState.left) move.addScaledVector(right, 1);
+  if (moveState.right) move.addScaledVector(right, -1);
+
+  if (move.lengthSq() > 0) {
+    move.normalize();
+    move.multiplyScalar(moveSpeed * delta);
+    camera.position.add(move);
+    // also move the controls target so orbit center follows camera movements
+    controls.target.add(move);
+  }
 }
 
 function onWindowResize() {
