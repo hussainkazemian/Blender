@@ -13,6 +13,15 @@ let lastTime = performance.now();
 // No demo geometries; we'll only show HDR and loaded models.
 let worldGroup; // holds all loaded models as a single group
 
+// Helper to prefix asset URLs with the correct base path in dev/prod
+// Note: new URL(relative, base) requires base to be an absolute URL; here we join strings safely.
+const assetUrl = (path) => {
+  const base = (import.meta.env.BASE_URL || '/');
+  const baseNorm = base.endsWith('/') ? base : base + '/';
+  const pathNorm = String(path || '').replace(/^\/+/, '');
+  return baseNorm + pathNorm;
+};
+
 init();
 
 function init() {
@@ -55,18 +64,22 @@ function init() {
   // Environment map (EXR/HDR) -> PMREM for proper PBR lighting
   // Primary: Qwantani Night (public/HDR/qwantani_night_4k.exr)
   // Secondary: Rogaland Clear Night, then fallback to bundled spooky bamboo
-  setupEnvironment('/HDR/qwantani_night_4k.exr');
+  setupEnvironment(
+    assetUrl('HDR/qwantani_night_4k.exr'),
+    assetUrl('HDR/rogland_clear_night_4k.exr'),
+    assetUrl('spooky_bamboo_morning_4k.exr')
+  );
 
   // Load background and car models (bottle removed).
   // Background: public/models/background/background.glb
-  loadGLTF('/models/background/background.glb', (model) => {
+  loadGLTF(assetUrl('models/background/background.glb'), (model) => {
     // Center and drop to floor; adjust size as needed for your asset
     normalizeCenterAndFloor(model, { targetSize: 12, yFloor: true });
     // Frame entire world group
     fitCameraToObject(camera, worldGroup, controls, 1.25);
   });
   // Car scene: public/models/car_scene/scene.gltf
-  loadGLTF('/models/car_scene/scene.gltf', (model) => {
+  loadGLTF(assetUrl('models/car_scene/scene.gltf'), (model) => {
     normalizeCenterAndFloor(model, { targetSize: 6, yFloor: true });
     // Re-frame to include all loaded models
     fitCameraToObject(camera, worldGroup, controls, 1.25);
