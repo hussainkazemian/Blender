@@ -1,12 +1,17 @@
 import './style.css';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 
-let container, camera, scene, renderer, cube;
+let container, camera, scene, renderer;
 let controls;
 let moveState = { forward: 0, back: 0, left: 0, right: 0 };
 let moveSpeed = 6; // units per second
 let lastTime = performance.now();
+// No demo geometries; we'll only show HDR and loaded models.
+let worldGroup; // holds all loaded models as a single group
 
 init();
 
@@ -25,36 +30,57 @@ function init() {
 
   // Scene
   scene = new THREE.Scene();
+  worldGroup = new THREE.Group();
+  worldGroup.name = 'WorldGroup';
+  scene.add(worldGroup);
+
+  // Renderer
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  // color management & tone mapping
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
+  // make canvas scale to container
+  renderer.domElement.style.width = '100%';
+  renderer.domElement.style.height = '100%';
+  container.appendChild(renderer.domElement);
 
   // Camera
   camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
   // place the camera so the full grid is visible on load
   camera.position.set(0, 6, 12);
 
-  // Renderer
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(window.devicePixelRatio || 1);
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  // make canvas scale to container
-  renderer.domElement.style.width = '100%';
-  renderer.domElement.style.height = '100%';
-  container.appendChild(renderer.domElement);
+  // Environment map (EXR/HDR) -> PMREM for proper PBR lighting
+  // Primary: Qwantani Night (public/HDR/qwantani_night_4k.exr)
+  // Secondary: Rogaland Clear Night, then fallback to bundled spooky bamboo
+  setupEnvironment('/HDR/qwantani_night_4k.exr');
 
-  // Cube
-  const geometry = new THREE.BoxGeometry(1, 1, 1);
-  const material = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
-  cube = new THREE.Mesh(geometry, material);
-  scene.add(cube);
+  // Load background and car models (bottle removed).
+  // Background: public/models/background/background.glb
+  loadGLTF('/models/background/background.glb', (model) => {
+    // Center and drop to floor; adjust size as needed for your asset
+    normalizeCenterAndFloor(model, { targetSize: 12, yFloor: true });
+    // Frame entire world group
+    fitCameraToObject(camera, worldGroup, controls, 1.25);
+  });
+  // Car scene: public/models/car_scene/scene.gltf
+  loadGLTF('/models/car_scene/scene.gltf', (model) => {
+    normalizeCenterAndFloor(model, { targetSize: 6, yFloor: true });
+    // Re-frame to include all loaded models
+    fitCameraToObject(camera, worldGroup, controls, 1.25);
+  });
 
-  // Add sample geometries (grid)
-  createGeometries();
+  // No sample geometries — the scene showcases HDR lighting and external models only.
 
   // Light and helpers
   const light = new THREE.HemisphereLight(0xffffbb, 0x080820, 1);
   scene.add(light);
 
-  const axesHelper = new THREE.AxesHelper(5);
-  scene.add(axesHelper);
+  // Optional: axes helper for reference (comment out to hide)
+  // const axesHelper = new THREE.AxesHelper(5);
+  // scene.add(axesHelper);
 
   // Start render loop
   renderer.setAnimationLoop(animate);
@@ -75,6 +101,158 @@ function init() {
 
   // Handle resize
   window.addEventListener('resize', onWindowResize, false);
+}
+
+function setupEnvironment(primaryPath, secondaryPath, fallbackPath) {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileEquirectangularShader();
+
+  const onLoaded = (tex) => {
+    const envMap = pmrem.fromEquirectangular(tex).texture;
+    scene.environment = envMap;
+    scene.background = envMap; // comment this if you want a solid color background
+    tex.dispose();
+    pmrem.dispose();
+    console.log('Environment map set from', currentPath);
+  };
+
+  let currentPath = primaryPath;
+
+  const loadByExtension = (path, onSuccess, onError) => {
+    if (!path) return onError?.(new Error('No environment path provided'));
+    const lower = path.toLowerCase();
+    if (lower.endsWith('.exr')) {
+      new EXRLoader().load(path, onSuccess, undefined, onError);
+    } else if (lower.endsWith('.hdr')) {
+      new RGBELoader().load(path, onSuccess, undefined, onError);
+    } else {
+      onError?.(new Error('Unsupported environment file: ' + path));
+    }
+  };
+
+  const tryLoad = (paths) => {
+    if (!paths.length) return console.error('No environment loaded (all paths failed).');
+    currentPath = paths[0];
+    loadByExtension(currentPath, (texture) => onLoaded(texture), (err) => {
+      console.warn('Failed to load environment at', currentPath, err);
+      tryLoad(paths.slice(1));
+    });
+  };
+
+  const paths = [primaryPath, secondaryPath, fallbackPath].filter(Boolean);
+  tryLoad(paths);
+}
+
+function loadGLTF(path, onModelLoaded) {
+  const loader = new GLTFLoader();
+  loader.load(
+    path,
+    (gltf) => {
+      const model = gltf.scene || gltf.scenes[0];
+      // Ensure metric scale (1 unit = 1 meter). Adjust only if needed.
+      model.scale.set(1, 1, 1);
+      model.position.set(0, 0, 0);
+      model.traverse((obj) => {
+        if (obj.isMesh) {
+          obj.castShadow = true;
+          obj.receiveShadow = true;
+          if (obj.material) {
+            // Make sure color space is correct
+            if (obj.material.map) obj.material.map.colorSpace = THREE.SRGBColorSpace;
+            if (obj.material.emissiveMap) obj.material.emissiveMap.colorSpace = THREE.SRGBColorSpace;
+          }
+        }
+      });
+      worldGroup.add(model);
+      console.log('GLTF loaded:', path);
+      if (typeof onModelLoaded === 'function') {
+        try { onModelLoaded(model, gltf); } catch (e) { console.warn('onModelLoaded handler error', e); }
+      }
+    },
+    (progress) => {
+      // console.log('GLTF load', (progress.loaded / progress.total) * 100, '%');
+    },
+    (error) => {
+      console.error('Error loading GLTF:', error);
+    }
+  );
+}
+
+// Places `model` so its bottom rests just above the top of `base`, using bounding boxes.
+function autoPlaceAbove(model, base, margin = 0.1) {
+  const baseBox = new THREE.Box3().setFromObject(base);
+  const modelBox = new THREE.Box3().setFromObject(model);
+  if (!baseBox.isEmpty() && !modelBox.isEmpty()) {
+    const baseTop = baseBox.max.y;
+    const modelBottom = modelBox.min.y;
+    const deltaY = baseTop + margin - modelBottom;
+    model.position.y += deltaY;
+  } else {
+    // Fallback: lift it a bit if bounding boxes fail
+    model.position.y += 1.0 + margin;
+  }
+}
+
+// Scales model uniformly so its largest dimension equals targetSize (meters),
+// optionally centers it at world origin and drops it so bottom touches y=0.
+function normalizeCenterAndFloor(model, { targetSize = 5, yFloor = true } = {}) {
+  const box = new THREE.Box3().setFromObject(model);
+  if (box.isEmpty()) return;
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const scale = maxDim > 0 ? targetSize / maxDim : 1;
+  model.scale.multiplyScalar(scale);
+
+  // Recompute box after scaling
+  const newBox = new THREE.Box3().setFromObject(model);
+  const center = new THREE.Vector3();
+  newBox.getCenter(center);
+
+  // Move model so its center sits at origin on X/Z (keep relative Y for floor step)
+  model.position.x -= center.x;
+  model.position.z -= center.z;
+
+  if (yFloor) {
+    const afterBox = new THREE.Box3().setFromObject(model);
+    const bottom = afterBox.min.y;
+    model.position.y -= bottom; // lift so bottom sits at y=0
+  }
+}
+
+// Frames camera and controls to fit the object nicely on screen.
+function fitCameraToObject(camera, object, controls, offset = 1.25) {
+  const box = new THREE.Box3().setFromObject(object);
+  if (box.isEmpty()) return;
+
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+
+  // Compute distance from FOV and object size (fit vertically, consider aspect for horizontal)
+  const maxSize = Math.max(size.x, size.y, size.z);
+  const fov = THREE.MathUtils.degToRad(camera.fov);
+  let distance = (maxSize / 2) / Math.tan(fov / 2);
+  if (camera.aspect < 1) {
+    // portrait-ish: back up a bit more
+    distance = distance / camera.aspect;
+  }
+  distance *= offset;
+
+  // Place camera along its current look direction, at computed distance from center
+  const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion); // camera forward
+  const newPos = center.clone().add(dir.multiplyScalar(distance));
+  camera.position.copy(newPos);
+
+  camera.near = Math.max(0.01, distance / 100);
+  camera.far = Math.max(5000, distance * 100);
+  camera.updateProjectionMatrix();
+
+  if (controls) {
+    controls.target.copy(center);
+    controls.update();
+  }
 }
 
 function createHUD() {
@@ -107,51 +285,7 @@ function createHUD() {
   });
 }
 
-function createGeometries() {
-  const materials = [
-    new THREE.MeshPhongMaterial({ color: 0xff4444 }),
-    new THREE.MeshPhongMaterial({ color: 0x44ff44 }),
-    new THREE.MeshPhongMaterial({ color: 0x4444ff }),
-    new THREE.MeshPhongMaterial({ color: 0xffff44 })
-  ];
-
-  const geometries = [
-    new THREE.SphereGeometry(0.9, 20, 12),
-    new THREE.IcosahedronGeometry(0.9),
-    new THREE.OctahedronGeometry(0.9),
-    new THREE.TetrahedronGeometry(0.9),
-    new THREE.PlaneGeometry(1.6, 1.6, 4, 4),
-    new THREE.BoxGeometry(1.2, 1.2, 1.2, 2, 2, 2),
-    new THREE.CircleGeometry(0.8, 32),
-    new THREE.RingGeometry(0.2, 0.8, 32),
-    new THREE.CylinderGeometry(0.4, 0.9, 1.2, 16, 1),
-    new THREE.TorusGeometry(0.8, 0.25, 16, 32),
-    new THREE.TorusKnotGeometry(0.6, 0.18, 64, 8),
-    new THREE.CapsuleGeometry(0.3, 0.8, 4, 8)
-  ];
-
-  const rows = 4;
-  const cols = 4;
-  const spacing = 3.0;
-  let index = 0;
-
-  for (let i = 0; i < rows; i++) {
-    for (let j = 0; j < cols; j++) {
-      const geo = geometries[index % geometries.length];
-      const mat = materials[(i + j) % materials.length];
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.x = (i - (rows - 1) / 2) * spacing + 8; // offset so camera starts near
-      mesh.position.z = (j - (cols - 1) / 2) * spacing;
-      mesh.position.y = 0.6;
-      mesh.rotation.y = Math.PI * 0.1 * (i + j);
-      scene.add(mesh);
-      index++;
-    }
-  }
-
-  // Additional parametric shapes
-  // simple klein / mobius could be added if needed via ParametricGeometry import
-}
+// No sample geometry creation; we focus on environment + imported models.
 
 function animate() {
   const now = performance.now();
@@ -160,18 +294,6 @@ function animate() {
 
   // apply WASD movement
   updateMovement(delta);
-
-  // rotate the main cube a bit
-  cube.rotation.x += 0.01;
-  cube.rotation.y += 0.01;
-
-  // rotate all other meshes in the scene
-  scene.traverse(function (object) {
-    if (object.isMesh && object !== cube) {
-      object.rotation.x += 0.005;
-      object.rotation.y += 0.01;
-    }
-  });
 
   // update controls for damping
   if (controls) controls.update();
